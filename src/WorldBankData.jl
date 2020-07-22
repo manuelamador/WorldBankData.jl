@@ -6,6 +6,7 @@ module WorldBankData
 using HTTP
 using JSON
 using DataFrames
+using Dates
 
 export wdi, search_wdi
 
@@ -204,49 +205,69 @@ function clean_append!(vals::Union{Array{String,1},Array{String,1}}, val::Union{
     append!(vals, [clean_entry(val)])
 end
 
-function parse_wdi(indicator::String, jsondata::Array{Any,1}, startyear::Integer, endyear::Integer)::DataFrame
+function quartermonth(x::AbstractString) 
+    if x == "1"
+        m = "01"
+    elseif x == "2"
+        m = "04"
+    elseif x == "3"
+        m = "07"
+    elseif x == "4"
+        m = "10"
+    else 
+        m = "NA"
+    end
+    return m
+end
+
+
+function parse_date(s::AbstractString)
+    if occursin("Q", s)
+        return parse_quarterly(s), "Q"
+    elseif occursin("M", s)
+        return parse_monthly(s), "M"
+    elseif length(s) == 4
+        parse_yearly(s), "Y"
+    else 
+        missing, "NA"
+    end 
+end
+
+parse_yearly(s) = Dates.Date(s, "yyyy")
+
+parse_monthly(s) = Dates.Date(s, dateformat"yyyy\Mmm")
+
+function parse_quarterly(s) 
+    q = split(s, "Q")
+    Dates.Date(q[1] * quartermonth(q[2]), dateformat"yyyymm")
+end 
+
+function parse_wdi(indicator::String, jsondata::Union{Array{Any,1}, Nothing}, startdate::Date, enddate::Date)::DataFrame
     country_id = String[]
     country_name = String[]
     value = Union{Float64,Missing}[]
-    date = String[]
+    date = Date[]
+    freq = String[]
 
-    for d in jsondata
-        clean_append!(country_id, d["country"]["id"])
-        clean_append!(country_name, d["country"]["value"])
-        push!(value, d["value"] isa Nothing ? missing : d["value"])
-        clean_append!(date, d["date"])
+    if !(jsondata isa Nothing)
+        for d in jsondata
+            clean_append!(country_id, d["country"]["id"])
+            clean_append!(country_name, d["country"]["value"])
+            push!(value, d["value"] isa Nothing ? missing : d["value"])
+            date_val, freq_val = parse_date(d["date"])
+            push!(date, date_val)
+            push!(freq, freq_val)
+        end
     end
-
-    date = tofloat.(date)
-
-    df = DataFrame(iso2c=country_id, country=country_name)
+    
+    df = DataFrame(iso2c=country_id, country=country_name, frequency=freq, date=date)
+    df[!, :year] = convert.(Float64, Dates.year.(date)) # for compatibility
     df[!, make_symbol(indicator)] = value
-    df[!, :year] = date
-
-    finyear = ceil(endyear)
-    if endyear == -1
-        finyear = Inf
-    end
-
-    checkyear(x) = (x >= startyear) & (x <= finyear)
-    yind = map(checkyear, df[!, :year])
-    df[yind, :]
+    
+    filter(row -> startdate<= row[:date] <= enddate, df)
 end
 
-function get_url(indicator::String, countries::Union{String,Array{String,1}}, startyear::Integer, endyear::Integer; verbose::Bool=false)::String
-    datestr = ""
-    if startyear == -1 && endyear == -1
-        datestr = ""
-    elseif startyear == -1 && endyear != -1
-        datestr = string("&date=1800:", endyear)
-    elseif startyear != -1 && endyear == -1
-        error("need to also set endyear if startyear is given")
-    elseif startyear != -1 && endyear != -1
-        datestr = string("&date=", startyear, ":", endyear)
-    else
-        error("internal error. should never get here")
-    end
-
+function get_url(indicator::String, countries::Union{String,Array{String,1}}; verbose::Bool=false)::String
     countriesstr = ""
     if typeof(countries) == String
         countriesstr = countries
@@ -260,13 +281,13 @@ function get_url(indicator::String, countries::Union{String,Array{String,1}}, st
         end
     end
     url = string("https://api.worldbank.org/v2/countries/", countriesstr, "/indicators/", indicator,
-                 "?format=json&per_page=25000", datestr)
+                 "?format=json&per_page=25000")
 
     url
 end
 
-function wdi_download(indicator::String, countries::Union{String,Array{String,1}}, startyear::Integer, endyear::Integer; verbose::Bool=false)::DataFrame
-    url = get_url(indicator, countries, startyear, endyear, verbose=verbose)
+function wdi_download(indicator::String, countries::Union{String,Array{String,1}}, startyear::Date, endyear::Date; verbose::Bool=false)::DataFrame
+    url = get_url(indicator, countries, verbose=verbose)
     jsondata = download_parse_json(url, verbose=verbose)
 
     if length(jsondata) == 1
@@ -285,7 +306,6 @@ function wdi_download(indicator::String, countries::Union{String,Array{String,1}
     parse_wdi(indicator, jsondata[2], startyear, endyear)
 end
 
-all_countries = ["AW", "AF", "A9", "AO", "AL", "AD", "L5", "1A", "AE", "AR", "AM", "AS", "AG", "AU", "AT", "AZ", "BI", "B4", "B7", "BE", "BJ", "BF", "BD", "BG", "B1", "BH", "BS", "BA", "B2", "BY", "BZ", "B3", "BM", "BO", "BR", "BB", "BN", "B6", "BT", "BW", "C9", "CF", "CA", "C4", "B8", "C5", "CH", "JG", "CL", "CN", "CI", "C6", "C7", "CM", "CD", "CG", "CO", "KM", "CV", "CR", "C8", "S3", "CU", "CW", "KY", "CY", "CZ", "D4", "D7", "DE", "D8", "DJ", "D2", "DM", "D3", "D9", "DK", "N6", "DO", "D5", "F6", "D6", "6D", "DZ", "4E", "V2", "Z4", "7E", "Z7", "EC", "EG", "XC", "ER", "ES", "EE", "ET", "EU", "F1", "FI", "FJ", "FR", "FO", "FM", "6F", "GA", "GB", "GE", "GH", "GI", "GN", "GM", "GW", "GQ", "GR", "GD", "GL", "GT", "GU", "GY", "XD", "HK", "HN", "XE", "HR", "HT", "HU", "ZB", "XF", "ZT", "XG", "XH", "ID", "XI", "IM", "IN", "XY", "IE", "IR", "IQ", "IS", "IL", "IT", "JM", "JO", "JP", "KZ", "KE", "KG", "KH", "KI", "KN", "KR", "KW", "XJ", "LA", "LB", "LR", "LY", "LC", "ZJ", "L4", "XL", "XM", "LI", "LK", "XN", "XO", "LS", "V3", "LT", "LU", "LV", "MO", "MF", "MA", "L6", "MC", "MD", "M1", "MG", "MV", "ZQ", "MX", "MH", "XP", "MK", "ML", "MT", "MM", "XQ", "ME", "MN", "MP", "MZ", "MR", "MU", "MW", "MY", "XU", "M2", "NA", "NC", "NE", "NG", "NI", "NL", "6L", "NO", "NP", "6X", "NR", "6N", "NZ", "OE", "OM", "S4", "PK", "PA", "PE", "PH", "PW", "PG", "PL", "V1", "PR", "KP", "PT", "PY", "PS", "S2", "V4", "PF", "QA", "RO", "R6", "O6", "RU", "RW", "8S", "SA", "L7", "SD", "SN", "SG", "SB", "SL", "SV", "SM", "SO", "RS", "ZF", "SS", "ZG", "S1", "ST", "SR", "SK", "SI", "SE", "SZ", "SX", "A4", "SC", "SY", "TC", "TD", "T4", "T7", "TG", "TH", "TJ", "TM", "T2", "TL", "T3", "TO", "T5", "T6", "TT", "TN", "TR", "TV", "TW", "TZ", "UG", "UA", "XT", "UY", "US", "UZ", "VC", "VE", "VG", "VI", "VN", "VU", "1W", "WS", "XK", "A5", "YE", "ZA", "ZM", "ZW"]
 
 """
 function wdi(indicators::Union{String,Array{String,1}}, countries::Union{String,Array{String,1}}, startyear::Integer = -1, endyear::Integer = -1; extra::Bool = false, verbose::Bool = false)::DataFrame
@@ -306,30 +326,47 @@ https://datacatalog.worldbank.org/dataset/world-development-indicators
 ```julia
 df = wdi("SP.POP.TOTL", "US", 1980, 2012, extra=true)
 df = wdi("SP.POP.TOTL", "USA", 1980, 2012, extra=true)
-df = wdi("SP.POP.TOTL", "all", 2000, 2000, verbose=true, extra=true)
+df = wdi("SP.POP.TOTL", "all", 2000, 2000, verbose=true, extra=true) # gets all countries and regions 
+df = wdi("SP.POP.TOTL", "all_countries", 2000, 2000, verbose=true, extra=true) # selects only countries, not regional aggregates
 df = wdi("SP.POP.TOTL", ["US","BR"], 1980, 2012, extra=true)
 df = wdi(["SP.POP.TOTL", "NY.GDP.MKTP.CD"], ["US","BR"], 1980, 2012, extra=true)
 ```
 """
-function wdi(indicators::Union{String,Array{String,1}}, countries::Union{String,Array{String,1}}, startyear::Integer=-1, endyear::Integer=-1; extra::Bool=false, verbose::Bool=false)::DataFrame
+function wdi(indicators::Union{String,Array{String,1}}, countries::Union{String,Array{String,1}}, startyear::Int, endyear::Int; extra::Bool=false, verbose::Bool=false)::DataFrame
+    wdi(indicators, countries, Date(startyear), Date(endyear, 12, 31); extra=extra, verbose=verbose)
+end 
+
+
+function wdi(indicators::Union{String,Array{String,1}}, countries::Union{String,Array{String,1}}, startdate::Date=Date(1000), enddate::Date=Date(3000); extra::Bool=false, verbose::Bool=false)::DataFrame
+    
     if typeof(countries) == String
-        countries = [countries]
+        if countries == "all_countries"
+            countries = filter(x -> (x["region"] != "Aggregates"), WorldBankData.get_countries())[:, :iso2c]  # filter out aggregates
+        elseif countries == "all"
+            countries = get_countries()[:, :iso2c]
+        else
+            countries = [countries]
+        end
     end
 
-    if ! (startyear <= endyear)
-        error("startyear has to be < endyear. startyear=", startyear, ". endyear=", endyear)
+    countries = unique(countries) # eliminate duplicated countries
+
+    if ! (startdate <= enddate)
+        error("startdate has to be < enddate. startdate=", startdate, ". enddate=", enddate)
     end
 
     if typeof(indicators) == String
         indicators = [indicators]
     end
 
-    df = wdi_download(indicators[1], countries, startyear, endyear, verbose=verbose)
+    indicators = unique(indicators) # eliminate duplicated series 
+
+    df = wdi_download(indicators[1], countries, startdate, enddate, verbose=verbose)
 
     if length(indicators) > 1
         noindcols = [x for x in filter(x -> !(make_symbol(x) in map(make_symbol, indicators)), names(df))]
         for ind in indicators[2:length(indicators)]
-            dfn = wdi_download(ind, countries, startyear, endyear, verbose=verbose)
+            dfn = wdi_download(ind, countries, startdate, enddate, verbose=verbose)
             df = outerjoin(df, dfn, on=noindcols)
         end
     end
